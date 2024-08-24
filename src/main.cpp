@@ -1,7 +1,11 @@
 #include <Arduino.h>
 #include "BluetoothSerial.h"
 #include <EEPROM.h>
-//#include <NTPClient.h>
+ #include <Wire.h>
+#include <RTClib.h>
+ #include <SPI.h>
+
+
 
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
 #error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
@@ -12,9 +16,12 @@
 #define CHECKSUM_ADDR (500) // Zone de stockage de la checksum de la commande
 #define DATASIZE_ADDR (505) // Zone de stockage dans EEPROM de la longueur de la commande
 
+RTC_DS3231 rtc;
 
 BluetoothSerial SerialBT;
-bool test = true;
+bool test = false;
+bool dansLeSetup = true;
+
 
 //WiFiUDP ntpUDP;
 // Créez un objet NTPClient pour interroger un serveur NTP
@@ -35,7 +42,7 @@ int fois[] = {0, 0, 0, 0};
 String command = "";
 int actuel = 0;
 int relayCommandCount = 0;
-int manuel = 0;
+int manuel5mn = 0;
 int quelleZone =0;
 
 // en fonction de la saison un pourcentage de modification de la durée
@@ -78,7 +85,7 @@ void storeDataWithChecksum(String data) {
   EEPROM.commit(); // Save changes to EEPROM
 
   if(test){ 
-    Serial.println("Données stockées dans EEPROM: " + data); 
+    Serial.println("\n\nDonnées stockées dans EEPROM: " + data +"\n\n"); 
    // Serial.println("Checksum written to EEPROM: " + String(checksum));
   }
 }
@@ -135,20 +142,61 @@ String retrieveDataWithVerification() {
 // composition du bloc de commande : 
 //relay numéro / heure départ en secondes / durée en secondes / répétitions 0 1 2
 void interpretationDesCommnades(String command) {
-  String secondsDebut = "";
+  int RTCcompteur =0;
+  String minutesDebut = "";
   relayCommandCount = 0;
   int endIndex = command.indexOf('$');
   // $ sépare le début de command de la programmation
-  secondsDebut = command.substring(0, endIndex);
-  //if(test) Serial.println(" secondes debut " + secondsDebut);
-  
   // permet de mettre compteur à l'heure
-   compteur =  secondsDebut.toInt(); //********************************************************************** */
-  if(test) Serial.println(" compteur" + String(compteur));
+  DateTime now = rtc.now();// on récupère an jour  mois
+  minutesDebut = command.substring(0, endIndex);
+    //ajuster le  RTC aux denières valeurs
+    // si après reboot/reset on ne modifie pas le RTC
+    if(!dansLeSetup) {// on ne vient pas  du setup donc 
+      //synchronisation des secondes du RTC avec la date actuelle
+      
+      compteur =  minutesDebut.toInt(); 
+      if(test)Serial.println("le compteur avec setup = false " + String(compteur));
+      int hr =abs( compteur / 3600);
+      int mn = abs((compteur % 3600)/60);
+      int sec = compteur - (hr*3600 + mn*60);
+      
+       rtc.adjust(DateTime(now.year(),now.month(),now.day(),hr,mn,sec));
+      DateTime actuel = rtc.now();
+      RTCcompteur = actuel.hour()*3600 + actuel.minute()*60 + actuel.second();
+      
+   //si la différence entre RTC et compteur est supérieure à 30 mn 
+   //en particulier au changement d'horaire en été/hiver
+   // on réajuste le RTC 
+    // if(abs(RTCcompteur - compteur) > 1800 ){
+    //   int hr = compteur / 3600;
+    //   int mn = (compteur % 3600)/60;
+    //   rtc.adjust(DateTime(now.year(),now.month(),now.day(),hr,mn,0));
+    //   Serial.println("\nRTC ajusté à la valeur du compteur  " + String(compteur));
+    // }
+
+      compteur = RTCcompteur;
+    }
+    Serial.println();
+    Serial.println("\n compteur " + String(compteur) + "\n");
+    Serial.print(now.year(), DEC);
+    Serial.print('/');
+    Serial.print(now.month(), DEC);
+    Serial.print('/');
+    Serial.print(now.day(), DEC);
+    Serial.print(" ");
+    Serial.print(now.hour(), DEC);
+    Serial.print(':');
+    Serial.print(now.minute(), DEC);
+    Serial.print(':');
+    Serial.print(now.second(), DEC);
+    Serial.println();
+
+   
   unsigned int startIndex = 0;
   int blocIndex = command.indexOf('&');
   // on décompose les commandes
-  startIndex = secondsDebut.length() + 1;
+  startIndex = minutesDebut.length() + 1;
 
   while (startIndex < command.length()) { // fin de command ?
     if (blocIndex == -1) { // fin du bloc de commandes du relay
@@ -195,6 +243,7 @@ void interpretationDesCommnades(String command) {
 
 
 void executionDeLaCommande(RelayCommand &relayCmd) {
+  //if(test) {Serial.println("\n\ndans executionDeLaCommande Relay Numéro " + String(relayCmd.action ) );}
   int relayNumber  = relayCmd.action - 1; // on commence à indice 0 dans le tableau des relais
     //on est à l'heure d'arrosage
      if (!relayCmd.inProgress && !relayCmd.done && compteur == relayCmd.start) {
@@ -213,18 +262,10 @@ void executionDeLaCommande(RelayCommand &relayCmd) {
     }
 }
 
-void testerZone(){//arrosage forcé de 5mn testé chaque seconde
-  if(manuel == 0) manuel=millis()+(5*60*1000);
-    if(millis() > manuel)
-      { 
-      digitalWrite(relayPins[quelleZone], LOW); // Turn relay off
-      }else{//arrosage  pendant 5 mn
-      digitalWrite(relayPins[quelleZone], HIGH); // Turn relay on
-      }
-}
 
 
 void setup() {
+
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
   attente= millis();
@@ -233,6 +274,16 @@ void setup() {
   SerialBT.begin("ESP32 Bluetooth");// BLUETOOTH activé
   Serial.println("The device started, now you can pair it with bluetooth!");
 
+
+   Wire.begin(21, 27); // SDA (GPIO12), SCL (GPIO27)
+for (int i =0 ; i<10; i++)
+   { if (!rtc.begin()) {
+    Serial.println("Couldn't find RTC");
+    delay(100);
+    }
+  }
+  
+  
 //if (test){
       // WiFi.begin(ssid, password);
       // int wifiTimeout = 0;
@@ -257,25 +308,24 @@ void setup() {
   command = retrieveDataWithVerification();
   if(test) Serial.println("\n début commande stockée dans EEPROM :" + command);
   // Parse the command once
-  interpretationDesCommnades(command);
+  dansLeSetup = true;
+  interpretationDesCommnades(command);//true > donc dans le setup()
 }
 
 void loop() {
 
   if(SerialBT.available()){
-  String nouvelleCommande="";
-  nouvelleCommande = SerialBT.readStringUntil('\n'); // Read the nouvelleCommande string until a newline character
-  int cmd = nouvelleCommande.charAt(0);
-  int x = nouvelleCommande.length();
-   //Serial.println("\nlongueur cmd "+ String(x) );
+    String nouvelleCommande="";
+    nouvelleCommande = SerialBT.readStringUntil('\n'); // Read the nouvelleCommande string until a newline character
+    int cmd = nouvelleCommande.charAt(0);
     switch (cmd) {
 
           case 97:{
             //on a reçu la lettre 'a' lecture de EEPROM
             // ajout ajustement saisonnier
-            Serial.println( "\nEEPROM = " + command  );
-            Serial.println( "EEPROM ajustement saisonnier = " + String(ajustementSaison)  );
-            SerialBT.println( String(ajustementSaison) + "%" + command );
+            // Serial.println( "\nEEPROM = " + command  );
+            // Serial.println( "EEPROM ajustement saisonnier = " + String(ajustementSaison)  );
+            SerialBT.println( "\n" + String(ajustementSaison) + "%" + command +"\n");
           break;}
           
           case 122:{
@@ -287,14 +337,23 @@ void loop() {
             storeDataWithChecksum(command );// backup dans EEPROM
           break;}
 
-          case 109:{// reçu  "m" manuel tester la programmation
-                quelleZone = nouvelleCommande.substring(1).toInt();
-                 Serial.println("\n arrosage 5 mn = " + String(quelleZone) );
-                manuel=0;
-                for (int i = 0; i < numRelays; i++) {//tous les relays à 0
-                  digitalWrite(relayPins[i], LOW); // Relays are off initially
+          case 109:{// reçu  "m" manuel5mn tester la programmation
+                quelleZone = nouvelleCommande.substring(1,2).toInt();
+                int duree = nouvelleCommande.substring(2).toInt();
+                
+                 Serial.println("\n\n arrosage  " + String(quelleZone) + " pour " + String(duree) + " mn\n" );
+                if(manuel5mn == 0){
+                  for (int i = 0; i < numRelays; i++) {//tous les relays à 0
+                    digitalWrite(relayPins[i], LOW); // Relays are off initially
+                  }
                 }
-                testerZone();
+                
+                if(duree == 0 ){
+                  digitalWrite(relayPins[quelleZone], LOW);}
+                else {
+                  digitalWrite(relayPins[quelleZone], HIGH); // Arrosage de la zone
+                }
+               if(manuel5mn == 0){ manuel5mn=millis()+(duree*60*1000);}
           break;}
           
           case 37:{
@@ -310,35 +369,44 @@ void loop() {
         
           default:{
                 if(nouvelleCommande.length() > 8){
-                // for(int i = 0; i < numRelays; i++) {
-                //     digitalWrite(relayPins[i], LOW); // Relays are off initially
-                //   }
+                  dansLeSetup = false;
                 for (int i = 0; i < 4; i++) {
                   fois[i] = 0; // RAZ du tableau fois[]
                 }
                   command = nouvelleCommande;
                   storeDataWithChecksum(command);// backup dans EEPROM
                   Serial.println("\ncommande  reçue : "+ command);
-                  interpretationDesCommnades(command);
+                  interpretationDesCommnades(command );
                 }
             break;}
-      }
-  }
-
-  if( compteur > 86400) { // RAZ  du compteur à minuit
-    compteur = 1;
-    for(int i=0; i<4; i++){fois[i] = 0;}
     }
- 
+  }
 
   // Add a delay for readability
   if(millis() >= attente + 1000)
   {
-     testerZone();
-    compteur ++;
     attente = millis();
-    Serial.print("."+String(compteur));
-    
+    DateTime now = rtc.now();
+    Serial.print("   ");
+    Serial.print(now.hour(), DEC);
+    Serial.print(':');
+    Serial.print(now.minute(), DEC);
+    Serial.print(':');
+    Serial.print(now.second(), DEC);
+    Serial.print(" > ");
+   
+    compteur = now.hour()*3600 + now.minute()*60 + now.second();
+    if( compteur < 60) { // RAZ  du compteur à minuit
+      for(int i=0; i<4; i++){fois[i] = 0;}
+    }
+  
+    if( manuel5mn != 0 && millis() > manuel5mn){
+      for (int i = 0; i < numRelays; i++) {//tous les relays à 0
+        digitalWrite(relayPins[i], LOW); // Relays are off initially
+        }
+        manuel5mn = 0;
+    }
+      Serial.print(String(compteur));
   }
 
   //Iterate over each relay command and execute it if conditions are met
